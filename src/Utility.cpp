@@ -4,6 +4,31 @@
 
 bool disableAutoOpen = true;
 bool disableButton = false;
+bool onlyBlockInExterior = false;
+
+bool ShouldApplyLocalMapRestrictions() {
+    if (!disableAutoOpen && !disableButton) {
+        return false;
+    }
+
+    if (!onlyBlockInExterior) {
+        return true;
+    }
+
+    auto* player = RE::PlayerCharacter::GetSingleton();
+
+    if (!player) {
+        return false;
+    }
+
+    auto* cell = player->GetParentCell();
+
+    if (!cell) {
+        return false;
+    }
+
+    return cell->IsExteriorCell();
+}
 
 std::uint32_t GamepadKeycodeToMask(std::int32_t a_keyCode) {
     switch (a_keyCode) {
@@ -74,6 +99,7 @@ void LoadDataFromINI() {
 
     disableAutoOpen = ini.GetBoolValue("MapMenu", "bDisableAutoOpen", true);
     disableButton = ini.GetBoolValue("MapMenu", "bDisableButton", false);
+    onlyBlockInExterior = ini.GetBoolValue("MapMenu", "bOnlyBlockInExterior", false);
 
     if (disableButton) {
         disableAutoOpen = true;
@@ -81,6 +107,7 @@ void LoadDataFromINI() {
 
     logger::info(
         "Settings: bDisableAutoOpen={}, "
-        "bDisableButton={}",
-        disableAutoOpen, disableButton);
+        "bDisableButton={}, "
+        "bOnlyBlockInExterior={}",
+        disableAutoOpen, disableButton, onlyBlockInExterior);
 }

@@ -81,7 +81,7 @@ namespace {
     }
 
     void ApplyLocalMapButtonState(RE::MapMenu* a_menu, bool a_visible) {
-        if (!a_menu || !disableButton) {
+        if (!a_menu || !disableButton || !ShouldApplyLocalMapRestrictions()) {
             return;
         }
 
@@ -89,7 +89,7 @@ namespace {
     }
 
     void RestoreDisabledBottomBar(RE::MapMenu* a_menu) {
-        if (!a_menu || !disableButton) {
+        if (!a_menu || !disableButton || !ShouldApplyLocalMapRestrictions()) {
             return;
         }
 
@@ -101,7 +101,7 @@ namespace {
     }
 
     void QueueLocalMapButtonState(bool a_visible) {
-        if (!disableButton) {
+        if (!disableButton || !ShouldApplyLocalMapRestrictions()) {
             return;
         }
 
@@ -114,7 +114,7 @@ namespace {
         }
 
         tasks->AddUITask([a_visible]() {
-            if (!disableButton) {
+            if (!disableButton || !ShouldApplyLocalMapRestrictions()) {
                 return;
             }
 
@@ -163,7 +163,7 @@ struct InteriorLocalMapConditionHook {
     static bool thunk(void* a_state) {
         const bool result = func(a_state);
 
-        if (result && (disableAutoOpen || disableButton)) {
+        if (result && ShouldApplyLocalMapRestrictions()) {
             logger::trace("[LocalMap] Blocked initial automatic request");
 
             return false;
@@ -177,7 +177,7 @@ struct InteriorLocalMapConditionHook {
 
 struct LateLocalMapAutoOpenHook {
     static std::uint64_t thunk(RE::MapMenu* a_mapMenu, bool a_showLocalMap) {
-        if (a_showLocalMap && (disableAutoOpen || disableButton)) {
+        if (a_showLocalMap && ShouldApplyLocalMapRestrictions()) {
             logger::trace("[LocalMap] Blocked late automatic request");
 
             return 0;
@@ -191,7 +191,7 @@ struct LateLocalMapAutoOpenHook {
 
 struct LocalMapToggleHook {
     static std::uint64_t thunk(RE::MapMenu* a_mapMenu) {
-        if (!disableAutoOpen && !disableButton) {
+        if (!ShouldApplyLocalMapRestrictions()) {
             return func(a_mapMenu);
         }
 
@@ -234,7 +234,7 @@ struct LocalMapToggleHook {
 void HandleInputDeviceChange(RE::INPUT_DEVICE a_newDevice) {
     a_newDevice = NormalizeInputDevice(a_newDevice);
 
-    if (!disableAutoOpen && !disableButton) {
+    if (!ShouldApplyLocalMapRestrictions()) {
         g_lastInputDevice = a_newDevice;
         return;
     }
@@ -312,7 +312,7 @@ void HandleInputDeviceChange(RE::INPUT_DEVICE a_newDevice) {
 }
 
 void OpenLocationFinder() {
-    if (!disableAutoOpen && !disableButton) {
+    if (!ShouldApplyLocalMapRestrictions()) {
         return;
     }
 
@@ -339,9 +339,7 @@ void ResetMapMenuState()
 void QueueDisabledLocalMapButton() { QueueLocalMapButtonState(false); }
 
 bool NormalizeMapBeforeMenuClose() {
-    if (!disableAutoOpen && !disableButton) {
-        return false;
-    }
+    const bool restrictionsActive = ShouldApplyLocalMapRestrictions();
 
     auto* ui = RE::UI::GetSingleton();
 
@@ -352,32 +350,59 @@ bool NormalizeMapBeforeMenuClose() {
         return false;
     }
 
-    if (g_locationFinderOpen) {
-        logger::trace(
-            "[LocationFinder] Closing finder before Map Menu handles Cancel");
+    if (!restrictionsActive && onlyBlockInExterior && disableAutoOpen) {
+        auto* runtimeData = mapMenu->GetRuntimeData();
 
-        LocalMapToggleHook::func(mapMenu.get());
+        if (runtimeData) {
+            auto& localMapData = runtimeData->localMapMenu.GetRuntimeData();
 
-        g_locationFinderOpen = false;
-        g_gamepadFinderOpening = false;
-        g_localMapOpen = false;
+            if (localMapData.showingMap) {
+                logger::trace(
+                    "[LocalMap] Interior map closing while Local Map active; resetting to World Map");
 
-        if (disableButton) {
-            RestoreDisabledBottomBar(mapMenu.get());
+                LocalMapToggleHook::func(mapMenu.get());
+
+                g_localMapOpen = false;
+
+                return true;
+            }
         }
 
-        return true;
+        return false;
     }
 
-    if (disableAutoOpen && !disableButton && g_localMapOpen) {
-        logger::trace(
-            "[LocalMap] Returning to World Map before Map Menu handles Cancel");
+    if (!restrictionsActive) {
+        return false;
+    }
 
-        LocalMapToggleHook::func(mapMenu.get());
+    if (disableAutoOpen) {
+        auto* runtimeData = mapMenu->GetRuntimeData();
 
-        g_localMapOpen = false;
+        if (runtimeData) {
+            auto& localMapData = runtimeData->localMapMenu.GetRuntimeData();
 
-        return true;
+            if (localMapData.showingMap) {
+                const bool finderWasOpen = g_locationFinderOpen;
+
+                if (finderWasOpen) {
+                    logger::trace("[LocationFinder] Native local-map mode active on close; returning to World Map");
+                } else {
+                    logger::trace("[LocalMap] Native local-map mode active on close; returning to World Map");
+                }
+
+                LocalMapToggleHook::func(mapMenu.get());
+
+                g_locationFinderOpen = false;
+                g_gamepadFinderOpening = false;
+                g_localMapOpen = false;
+
+                if (disableButton && finderWasOpen) {
+                    RestoreDisabledBottomBar(mapMenu.get());
+                }
+
+                return true;
+            }
+        }
     }
 
     return false;
@@ -387,10 +412,20 @@ struct MapMenuProcessMessageHook {
     static RE::UI_MESSAGE_RESULTS thunk(RE::MapMenu* a_menu, RE::UIMessage& a_message) {
         const auto messageType = a_message.type.get();
 
+        if (!ShouldApplyLocalMapRestrictions()) {
+            const auto result = func(a_menu, a_message);
+
+            if (messageType == RE::UI_MESSAGE_TYPE::kShow || messageType == RE::UI_MESSAGE_TYPE::kHide ||
+                messageType == RE::UI_MESSAGE_TYPE::kForceHide) {
+                ResetMapMenuState();
+            }
+
+            return result;
+        }
+
         bool keyboardFinderOpening = false;
 
-        if ((disableAutoOpen || disableButton) && messageType == RE::UI_MESSAGE_TYPE::kScaleformEvent &&
-            a_message.data) {
+        if (messageType == RE::UI_MESSAGE_TYPE::kScaleformEvent && a_message.data) {
             auto* scaleformData = static_cast<RE::BSUIScaleformData*>(a_message.data);
 
             auto* event = scaleformData->scaleformEvent;
